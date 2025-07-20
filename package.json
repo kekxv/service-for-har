@@ -11,11 +11,13 @@
   "license": "ISC",
   "type": "module",
   "devDependencies": {
+    "@types/formidable": "^3.4.5",
     "@types/node": "^24.0.15",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
   },
   "dependencies": {
-    "chalk": "^5.4.1"
+    "chalk": "^5.4.1",
+    "formidable": "^3.5.4"
   }
 }
