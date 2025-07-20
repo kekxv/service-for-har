@@ -5,7 +5,7 @@ import { URL, URLSearchParams } from 'url';
 import { deepEqual } from 'assert';
 import chalk from 'chalk';
 
-// --- 类型定义 ---
+// --- 类型定义 (无变化) ---
 interface HarHeader { name: string; value: string; }
 interface HarPostData { mimeType: string; text?: string; }
 interface HarContent { text?: string; encoding?: 'base64' | string; mimeType: string; }
@@ -52,6 +52,11 @@ class HarReplayServer {
             const harJson: HarFile = JSON.parse(fileContent);
 
             for (const entry of harJson.log.entries) {
+                if (!entry || !entry.request || !entry.request.url || !entry.response) {
+                    console.warn(chalk.yellow('[WARN] Skipping malformed or incomplete entry in HAR file.'));
+                    continue;
+                }
+
                 const method = entry.request.method.toUpperCase();
                 const urlObject = new URL(entry.request.url, 'http://dummy.base');
                 const urlPath = urlObject.pathname;
@@ -120,16 +125,35 @@ class HarReplayServer {
         }
     }
     
-    private sendResponse(res: ServerResponse, entry: HarEntry): void {
+    private sendResponse(res: ServerResponse, entry: HarEntry | null | undefined): void {
+        if (!entry || !entry.response) {
+            console.error('[ERROR] Attempted to send a response from a null or malformed HAR entry.');
+            if (!res.headersSent) {
+                res.writeHead(500, { 'Content-Type': 'text/plain' });
+            }
+            if (!res.writableEnded) {
+                res.end('Internal Server Error: Malformed HAR entry data.');
+            }
+            return;
+        }
+
         const { response } = entry;
         const headers: http.OutgoingHttpHeaders = {};
-        response.headers
-            .filter(h => !['content-encoding', 'transfer-encoding'].includes(h.name.toLowerCase()))
+        
+        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+        // ★★★   THE KEY FIX IS HERE   ★★★
+        // ★★★   过滤掉 Content-Length，让 Node 自动计算   ★★★
+        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+        const a = response.headers
+            .filter(h => !['content-encoding', 'transfer-encoding', 'connection', 'content-length'].includes(h.name.toLowerCase()))
             .forEach(h => { headers[h.name] = h.value; });
         
         res.writeHead(response.status, response.statusText, headers);
-        if (response.content.text) {
-            const body = response.content.encoding === 'base64' ? Buffer.from(response.content.text, 'base64') : response.content.text;
+
+        if (response.content && response.content.text) {
+            const body = response.content.encoding === 'base64' 
+                ? Buffer.from(response.content.text, 'base64') 
+                : response.content.text;
             res.end(body);
         } else {
             res.end();
@@ -137,57 +161,69 @@ class HarReplayServer {
     }
     
     private requestHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-        const method = req.method?.toUpperCase() || 'GET';
-        const requestUrl = req.url || '/';
-        const urlPath = requestUrl.split('?')[0];
+        try {
+            const method = req.method?.toUpperCase() || 'GET';
+            const requestUrl = req.url || '/';
+            const urlPath = requestUrl.split('?')[0];
 
-        console.log(`[REQUEST] Received: ${method} ${requestUrl} (Matching path: ${urlPath})`);
+            console.log(`[REQUEST] Received: ${method} ${requestUrl} (Matching path: ${urlPath})`);
 
-        const replayState = this.harDataMap.get(method)?.get(urlPath);
-        if (!replayState) {
-            console.warn(`[NO MATCH] No candidate found for path: ${method} ${urlPath}`);
-            res.writeHead(404).end(`No entry found for path: ${method} ${urlPath}`);
-            return;
-        }
+            const replayState = this.harDataMap.get(method)?.get(urlPath);
+            if (!replayState || replayState.entries.length === 0) {
+                console.warn(`[NO MATCH] No candidate found for path: ${method} ${urlPath}`);
+                if (!res.headersSent) res.writeHead(404);
+                if (!res.writableEnded) res.end(`No entry found for path: ${method} ${urlPath}`);
+                return;
+            }
 
-        let priorityMatch: HarEntry | null = null;
-        let reqBody: string | null = null;
-
-        if (this.METHODS_WITH_BODY.has(method)) {
-            reqBody = await this.getRequestBody(req);
-        }
-        
-        for (const entry of replayState.entries) {
-            let isMatch = false;
+            let priorityMatch: HarEntry | null = null;
+            
             if (this.METHODS_WITH_BODY.has(method)) {
-                isMatch = this.compareBody(reqBody!, entry.request.postData);
+                const reqBody = await this.getRequestBody(req);
+                for (const entry of replayState.entries) {
+                    if (this.compareBody(reqBody, entry.request.postData)) {
+                        priorityMatch = entry;
+                        break;
+                    }
+                }
             } else {
-                isMatch = this.compareQueryParams(requestUrl, entry.request.url);
+                for (const entry of replayState.entries) {
+                    if (this.compareQueryParams(requestUrl, entry.request.url)) {
+                        priorityMatch = entry;
+                        break;
+                    }
+                }
+            }
+            
+            if (priorityMatch) {
+                console.log(chalk.green(`[MATCH] Found a priority match based on request parameters/body.`));
+                this.sendResponse(res, priorityMatch);
+                return;
             }
 
-            if (isMatch) {
-                priorityMatch = entry;
-                break;
+            const { entries, currentIndex } = replayState;
+            const fallbackEntry = entries[currentIndex];
+            
+            console.log(`[MATCH] No priority match. Using fallback cycle: serving response ${chalk.yellow(currentIndex + 1)} of ${entries.length}`);
+            
+            replayState.currentIndex = (currentIndex + 1) % entries.length;
+
+            this.sendResponse(res, fallbackEntry);
+
+        } catch (error) {
+            console.error(chalk.red('[FATAL HANDLER ERROR] An unexpected error occurred while handling request:'), error);
+            if (!res.headersSent) {
+                res.writeHead(500, { 'Content-Type': 'text/plain' });
+            }
+            if (!res.writableEnded) {
+                res.end('Internal Server Error');
             }
         }
-        
-        if (priorityMatch) {
-            console.log(`[MATCH] Found a priority match based on request parameters/body.`);
-            this.sendResponse(res, priorityMatch);
-            return;
-        }
-
-        const { entries, currentIndex } = replayState;
-        const fallbackEntry = entries[currentIndex];
-        console.log(`[MATCH] No priority match. Using fallback cycle: serving response ${currentIndex + 1} of ${entries.length}`);
-        replayState.currentIndex = (currentIndex + 1) % entries.length;
-        this.sendResponse(res, fallbackEntry);
     }
     
     public async start(): Promise<void> {
         await this.loadAndProcessHar();
-        // 绑定 this 上下文
-        const server = http.createServer(this.requestHandler.bind(this)); 
+        const server = http.createServer(this.requestHandler);
         server.listen(this.port, () => {
             console.log(`🚀 HAR Replay Server is running on http://localhost:${this.port}`);
             console.log(`   Simulating requests from: ${path.basename(this.harFilePath)}`);
