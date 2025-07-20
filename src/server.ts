@@ -24,6 +24,7 @@ class HarReplayServer {
     private storageDir: string;
     private harDataMap: Map<string, Map<string, ReplayState>> = new Map();
     private loadedHarFiles: string[] = [];
+    private lastReloadTimestamp: Date | null = null;
     private readonly METHODS_WITH_BODY = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
     constructor(initialSources: string[], storageDir: string = './har_storage', port: number = 3000) {
@@ -148,6 +149,7 @@ class HarReplayServer {
         for (const filePath of this.loadedHarFiles) {
             await this._processSingleHarFile(filePath);
         }
+        this.lastReloadTimestamp = new Date();
         this.printSummary();
     }
 
@@ -160,6 +162,7 @@ class HarReplayServer {
             }
         }
         console.log(`[INFO] Total ${chalk.green(totalEntries)} entries loaded from ${chalk.green(this.loadedHarFiles.length)} file(s).`);
+        console.log(`[INFO] Last reload at: ${this.lastReloadTimestamp?.toLocaleString()}`);
         console.log(chalk.bold("------------------------\n"));
     }
 
@@ -168,131 +171,234 @@ class HarReplayServer {
         await this.loadHars();
     }
     
+    private _resetAllReplayCycles() {
+        console.log(chalk.blue('[RESET] Resetting all replay cycles to index 0.'));
+        let resetCount = 0;
+        for (const pathMap of this.harDataMap.values()) {
+            for (const state of pathMap.values()) {
+                if (state.currentIndex !== 0) {
+                    state.currentIndex = 0;
+                    resetCount++;
+                }
+            }
+        }
+        console.log(chalk.green(`[RESET] Completed. ${resetCount} endpoint cycles were reset.`));
+    }
+    
     private requestHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
         const url = new URL(req.url || '/', `http://${req.headers.host}`);
         const method = req.method?.toUpperCase() || 'GET';
-        if (url.pathname === '/_manage' && method === 'GET') {
-            return this._serveManagementUi(res);
+
+        if (url.pathname.startsWith('/_manage')) {
+            if (method === 'GET' && url.pathname === '/_manage') {
+                return this._serveManagementUi(res);
+            }
+            if (method === 'POST') {
+                switch (url.pathname) {
+                    case '/_manage/upload': return this._handleUpload(req, res);
+                    case '/_manage/delete': return this._handleDelete(req, res);
+                    case '/_manage/reload':
+                        await this._reloadAllHars();
+                        res.writeHead(302, { 'Location': '/_manage?status=reloaded' }).end();
+                        return;
+                    case '/_manage/reset':
+                        this._resetAllReplayCycles();
+                        res.writeHead(302, { 'Location': '/_manage?status=reset' }).end();
+                        return;
+                }
+            }
         }
-        if (url.pathname === '/_manage/upload' && method === 'POST') {
-            return this._handleUpload(req, res);
-        }
-        if (url.pathname === '/_manage/delete' && method === 'POST') {
-            return this._handleDelete(req, res);
-        }
+        
         return this._replayRequest(req, res);
     }
     
-    private _serveManagementUi(res: ServerResponse) {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    private _getManagementPageViewModel() {
+        const files = this.loadedHarFiles.map(file => {
+            const basename = path.basename(file);
+            const isDeletable = path.dirname(file) === this.storageDir;
+            return { basename, fullPath: file, isDeletable };
+        }).sort((a, b) => a.basename.localeCompare(b.basename));
 
-        const filesHtml = this.loadedHarFiles.length > 0 
-            ? this.loadedHarFiles.map(file => {
-                const basename = path.basename(file);
-                const isDeletable = path.dirname(file) === this.storageDir;
-                const deleteButton = isDeletable 
-                    ? `<form action="/_manage/delete" method="post" style="display:inline;">
-                           <input type="hidden" name="filename" value="${basename}" />
-                           <button type="submit" class="delete">Delete</button>
-                       </form>`
-                    : `<span class="readonly">(Read-only)</span>`;
-                return `<li><span>${basename}</span> ${deleteButton}</li>`;
-            }).join('')
-            : '<li class="empty-state">No HAR files loaded.</li>';
-            
-        let endpointsHtml = '';
-        if (this.harDataMap.size > 0) {
-            const allEndpoints: {method: string, path: string, count: number}[] = [];
-            for (const [method, pathMap] of this.harDataMap.entries()) {
-                for (const [urlPath, state] of pathMap.entries()) {
-                    allEndpoints.push({ method, path: urlPath, count: state.entries.length });
-                }
+        const endpoints: {method: string, path: string, count: number, currentIndex: number}[] = [];
+        for (const [method, pathMap] of this.harDataMap.entries()) {
+            for (const [urlPath, state] of pathMap.entries()) {
+                endpoints.push({ method, path: urlPath, count: state.entries.length, currentIndex: state.currentIndex });
             }
-
-            allEndpoints.sort((a, b) => {
-                const aIsHtml = a.path.endsWith('.html') || a.path.endsWith('.htm');
-                const bIsHtml = b.path.endsWith('.html') || b.path.endsWith('.htm');
-                if (aIsHtml && !bIsHtml) return -1;
-                if (!aIsHtml && bIsHtml) return 1;
-                if (a.path < b.path) return -1;
-                if (a.path > b.path) return 1;
-                if (a.method < b.method) return -1;
-                if (a.method > b.method) return 1;
-                return 0;
-            });
-            
-            endpointsHtml = allEndpoints.map(endpoint => {
-                const pathElement = endpoint.method === 'GET'
-                    ? `<a href="${endpoint.path}" target="_blank" class="endpoint-path">${endpoint.path}</a>`
-                    : `<span class="endpoint-path">${endpoint.path}</span>`;
-                
-                return `
-                    <li class="endpoint-item">
-                        <span class="method-badge method-${endpoint.method.toLowerCase()}">${endpoint.method}</span>
-                        ${pathElement}
-                        <span class="count-badge">${endpoint.count}</span>
-                    </li>`;
-            }).join('');
-
-        } else {
-            endpointsHtml = '<li class="empty-state">No endpoints loaded.</li>';
         }
+        endpoints.sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
+        
+        const lastReload = this.lastReloadTimestamp ? this.lastReloadTimestamp.toLocaleString() : 'N/A';
+        
+        return { files, endpoints, lastReload };
+    }
+
+    private _serveManagementUi(res: ServerResponse) {
+        const { files, endpoints, lastReload } = this._getManagementPageViewModel();
+
+        const renderFileList = (fileList: typeof files): string => {
+            if (fileList.length === 0) return `<li class="empty-state">No HAR files loaded.</li>`;
+            return fileList.map(file => `
+                <li title="Full Path: ${file.fullPath}">
+                    <span class="file-name">${file.basename}</span>
+                    ${file.isDeletable
+                        ? `<form action="/_manage/delete" method="post" style="display:inline;">
+                               <input type="hidden" name="filename" value="${file.basename}" />
+                               <button type="submit" class="delete" title="Delete this file">🗑️</button>
+                           </form>`
+                        : `<span class="readonly" title="This file is from a read-only source.">(Read-only)</span>`
+                    }
+                </li>
+            `).join('');
+        };
+        
+        const renderEndpointList = (endpointList: typeof endpoints): string => {
+            if (endpointList.length === 0) return `<li class="empty-state">No endpoints loaded.</li>`;
+            return endpointList.map(ep => `
+                <li class="endpoint-item" data-search-term="${ep.method.toLowerCase()} ${ep.path.toLowerCase()}">
+                    <span class="method-badge method-${ep.method.toLowerCase()}">${ep.method}</span>
+                    ${ep.method === 'GET'
+                        ? `<a href="${ep.path}" target="_blank" class="endpoint-path" title="${ep.path}">${ep.path}</a>`
+                        : `<span class="endpoint-path" title="${ep.path}">${ep.path}</span>`
+                    }
+                    <span class="count-badge" title="This endpoint has ${ep.count} possible responses. Currently serving index ${ep.currentIndex}.">
+                        ${ep.currentIndex + 1} / ${ep.count}
+                    </span>
+                </li>
+            `).join('');
+        };
 
         const pageHtml = `
-            <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>HAR Replay Server Management</title>
-            <style>
-                :root { --main-bg: #f4f4f9; --panel-bg: #ffffff; --text-color: #333; --border-color: #ddd; --primary-color: #007bff; --danger-color: #dc3545; --light-gray: #888; }
-                body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: var(--main-bg); color: var(--text-color); margin: 0; padding: 2em; }
-                .container { max-width: 1200px; margin: auto; }
-                h1 { color: #444; margin-bottom: 1em; }
-                .grid-container { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 2em; }
-                .panel { background: var(--panel-bg); padding: 1.5em; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
-                h2 { color: #444; border-bottom: 2px solid #eee; padding-bottom: 10px; margin-top: 0; }
-                .upload-form { margin-bottom: 2em; display: flex; gap: 10px; align-items: center; }
-                input[type="file"] { border: 1px solid var(--border-color); padding: 10px; border-radius: 4px; flex-grow: 1; }
-                button { background-color: var(--primary-color); color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; transition: background-color 0.2s; }
-                button:hover { background-color: #0056b3; }
-                button.delete { background-color: var(--danger-color); }
-                button.delete:hover { background-color: #c82333; }
-                ul { list-style: none; padding: 0; }
-                li { background: #fafafa; border: 1px solid #eee; padding: 10px 15px; margin-bottom: 8px; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; font-size: 0.95em; }
-                li > span:first-child { font-family: 'Menlo', 'Courier New', monospace; flex-grow: 1; word-break: break-all; }
-                .endpoint-list li > span:first-child {flex-grow: unset;}
-                .readonly, .empty-state { color: var(--light-gray); font-style: italic; }
-                .endpoint-list { max-height: 60vh; overflow-y: auto; padding-right: 10px; }
-                .endpoint-item { gap: 15px; }
-                .endpoint-path { flex-grow: 1; font-family: 'Menlo', 'Courier New', monospace; color: #555; word-break: break-all; }
-                a.endpoint-path { color: var(--primary-color); text-decoration: none; }
-                a.endpoint-path:hover { text-decoration: underline; }
-                .method-badge { font-weight: bold; color: white; padding: 3px 8px; border-radius: 4px; font-size: 0.8em; text-align: center; min-width: 60px; flex-shrink: 0; }
-                .method-get { background-color: #61affe; }
-                .method-post { background-color: #49cc90; }
-                .method-put { background-color: #fca130; }
-                .method-delete { background-color: #f93e3e; }
-                .method-patch { background-color: #50e3c2; }
-                .method-options, .method-head { background-color: #9013fe; }
-                .count-badge { background-color: #e0e0e0; color: #555; padding: 3px 8px; border-radius: 10px; font-size: 0.8em; }
-            </style>
-            </head><body><div class="container">
-                <h1>HAR Replay Server</h1>
-                <div class="grid-container">
-                    <div class="panel">
-                        <h2>File Management</h2>
-                        <div class="upload-form">
-                            <form action="/_manage/upload" method="post" enctype="multipart/form-data" style="display: flex; flex-grow: 1; gap: 10px;">
-                                <input type="file" name="harfile" accept=".har" required />
-                                <button type="submit">Upload</button>
-                            </form>
-                        </div>
-                        <ul class="file-list">${filesHtml}</ul>
-                    </div>
-                    <div class="panel">
-                        <h2>Loaded Endpoints</h2>
-                        <ul class="endpoint-list">${endpointsHtml}</ul>
-                    </div>
-                </div>
-            </div></body></html>`;
-        res.end(pageHtml);
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>HAR Replay Server</title>
+<style>
+    :root { 
+        --bg-color: #f8f9fa; --panel-bg: #ffffff; --text-color: #212529; --border-color: #dee2e6; 
+        --primary: #007bff; --danger: #dc3545; --success: #28a745; --warning: #ffc107; --light-gray: #6c757d;
+        --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        --font-mono: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+    html, body { height: 100%; margin: 0; overflow: hidden; font-family: var(--font-sans); background-color: var(--bg-color); color: var(--text-color); }
+    body { box-sizing: border-box; padding-bottom: 3em;}
+    .container {
+        max-width: 1400px;
+        height: 100%;
+        margin: 0 auto;
+        padding: 2rem;
+        box-sizing: border-box;
+        display: grid;
+        grid-template-rows: auto 1fr;
+        grid-template-columns: 400px 1fr;
+        gap: 2rem;
+    }
+    h1 { grid-column: 1 / -1; margin: 0 0 0.5rem 0; color: #343a40; }
+    .sidebar { grid-row: 2 / 3; grid-column: 1 / 2; display: flex; flex-direction: column; gap: 2rem; min-height: 0; }
+    .main-content { grid-row: 2 / 3; grid-column: 2 / 3; min-height: 0; }
+    .panel { background: var(--panel-bg); padding: 1.5rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); display: flex; flex-direction: column; }
+    h2 { border-bottom: 1px solid var(--border-color); padding-bottom: 0.75rem; margin-top: 0; margin-bottom: 1rem; font-size: 1.25rem; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    .file-list { overflow-y: auto; }
+    .file-list li, .endpoint-item {
+        display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; 
+        border: 1px solid #e9ecef; border-radius: 5px; margin-bottom: 0.5rem; background-color: #fdfdfd;
+    }
+    .file-list li:hover { background-color: #f1f3f5; }
+    /* --- FIX: Long text handling for file names --- */
+    .file-name {
+        font-family: var(--font-mono); font-size: 0.9em; flex-grow: 1;
+        min-width: 0; /* Important for flexbox shrinking */
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .readonly { color: var(--light-gray); font-style: italic; font-size: 0.85em; }
+    .empty-state { text-align: center; color: var(--light-gray); padding: 2rem; font-style: italic; }
+    .upload-form { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+    input[type="file"] { flex-grow: 1; border: 1px solid var(--border-color); border-radius: 4px; }
+    input[type="file"]::file-selector-button { background-color: #e9ecef; border: none; padding: 0.5rem 0.75rem; border-right: 1px solid var(--border-color); cursor: pointer; }
+    button, .btn {
+        border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; transition: filter 0.2s; font-weight: 500;
+        display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem;
+    }
+    button:hover, .btn:hover { filter: brightness(0.9); }
+    .btn-primary { background-color: var(--primary); color: white; }
+    .btn-success { background-color: var(--success); color: white; }
+    .btn-warning { background-color: var(--warning); color: #212529; }
+    button.delete { background-color: transparent; color: var(--danger); font-size: 1.2rem; padding: 0.25rem; }
+    .server-actions form { display: block; margin-bottom: 0.75rem; }
+    .server-actions .btn { width: 100%; }
+    .status-bar { font-size: 0.85em; color: var(--light-gray); margin-top: auto; padding-top: 1rem; text-align: center; }
+    #endpoint-search { width: 100%; padding: 0.5rem 0.75rem; border: 1px solid var(--border-color); border-radius: 5px; margin-bottom: 1rem; font-size: 1em; box-sizing: border-box; }
+    .endpoint-list-container { height: 100%; }
+    .endpoint-list { flex-grow: 1; overflow-y: auto; padding-right: 10px; }
+    .endpoint-item { gap: 1rem; }
+    /* --- FIX: Long text handling for URL paths --- */
+    .endpoint-path {
+        flex-grow: 1; font-family: var(--font-mono); color: #343a40;
+        min-width: 0; /* Important for flexbox shrinking */
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    a.endpoint-path { color: var(--primary); text-decoration: none; }
+    a.endpoint-path:hover { text-decoration: underline; }
+    .method-badge { font-weight: bold; color: white; padding: 0.2em 0.6em; border-radius: 4px; font-size: 0.8em; text-align: center; min-width: 60px; flex-shrink: 0; }
+    .method-get { background-color: #007bff; } .method-post { background-color: #28a745; } .method-put { background-color: #ffc107; }
+    .method-delete { background-color: #dc3545; } .method-patch { background-color: #17a2b8; } .method-options, .method-head { background-color: #6f42c1; }
+    .count-badge { background-color: #e9ecef; color: var(--light-gray); padding: 0.2em 0.6em; border-radius: 10px; font-size: 0.8em; font-family: var(--font-mono); }
+</style>
+</head>
+<body>
+<div class="container">
+    <h1>HAR Replay Server</h1>
+    <div class="sidebar">
+        <div class="panel">
+            <h2>File Management</h2>
+            <form action="/_manage/upload" method="post" enctype="multipart/form-data" class="upload-form">
+                <input type="file" name="harfile" accept=".har" required />
+                <button type="submit" class="btn btn-primary">Upload</button>
+            </form>
+            <ul class="file-list">${renderFileList(files)}</ul>
+        </div>
+        <div class="panel">
+            <h2>Server Actions</h2>
+            <div class="server-actions">
+                <form action="/_manage/reload" method="post">
+                    <button type="submit" class="btn btn-success">🔄 Reload All HARs</button>
+                </form>
+                <form action="/_manage/reset" method="post">
+                    <button type="submit" class="btn btn-warning">⏪ Reset All Cycles</button>
+                </form>
+            </div>
+            <p class="status-bar">Last reload: ${lastReload}</p>
+        </div>
+    </div>
+    <div class="main-content panel endpoint-list-container">
+        <h2>Loaded Endpoints (${endpoints.length})</h2>
+        <input type="text" id="endpoint-search" placeholder="Search by method or path (e.g., 'get /api/users')...">
+        <ul class="endpoint-list">${renderEndpointList(endpoints)}</ul>
+    </div>
+</div>
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const searchInput = document.getElementById('endpoint-search');
+        if (searchInput) {
+            searchInput.addEventListener('input', (e) => {
+                const searchTerm = e.target.value.toLowerCase().trim();
+                const endpoints = document.querySelectorAll('.endpoint-item');
+                endpoints.forEach(item => {
+                    const itemTerm = item.getAttribute('data-search-term') || '';
+                    if (itemTerm.includes(searchTerm)) {
+                        item.style.display = 'flex';
+                    } else {
+                        item.style.display = 'none';
+                    }
+                });
+            });
+        }
+    });
+</script>
+</body>
+</html>`;
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(pageHtml);
     }
     
     private async _handleUpload(req: IncomingMessage, res: ServerResponse) {
@@ -366,7 +472,7 @@ class HarReplayServer {
             const method = req.method?.toUpperCase() || 'GET';
             const requestUrl = req.url || '/';
             const urlPath = new URL(requestUrl, `http://${req.headers.host}`).pathname;
-            console.log(`[REQUEST] Received: ${method} ${requestUrl} (Matching path: ${urlPath})`);
+            console.log(`[REQUEST] Received: ${method} ${this.colorizeUrlPath(method, urlPath)}`);
             const replayState = this.harDataMap.get(method)?.get(urlPath);
             if (!replayState || replayState.entries.length === 0) {
                 console.warn(`[NO MATCH] No candidate found for path: ${method} ${urlPath}`);
