@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import http, { IncomingMessage, ServerResponse } from 'http';
 import { promises as fs } from 'fs';
 import path from 'path';
