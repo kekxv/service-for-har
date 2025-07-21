@@ -6,8 +6,6 @@ on:
       - main
     paths:
       - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'src/**'
       - '.github/workflows/publish.yml'
 
 jobs:

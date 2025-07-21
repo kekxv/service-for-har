@@ -1,6 +1,6 @@
 {
   "name": "service-for-har",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "",
   "main": "dist/server.js",
   "bin": {
@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node dist/server.js",
     "dev": "node --loader ts-node/esm src/server.ts",
-    "build": "tsc"
+    "build": "tsc && chmod +x dist/server.js"
   },
   "keywords": [],
   "author": "",
