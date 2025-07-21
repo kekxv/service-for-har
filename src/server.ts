@@ -540,11 +540,36 @@ class HarReplayServer {
     }
 }
 
+// 解析命令行参数 --port=xxxx 和 --path=xxxx
+function getArgvValue(key: string): string | undefined {
+  const arg = process.argv.find(arg => arg.startsWith(`--${key}=`));
+  if (arg) return arg.split('=')[1];
+  return undefined;
+}
+
+function getPortFromArgv(defaultPort: number): number {
+  const portStr = getArgvValue('port');
+  if (portStr) {
+    const port = parseInt(portStr, 10);
+    if (!isNaN(port)) return port;
+  }
+  return defaultPort;
+}
+
+function getStoragePath(defaultPath: string): string {
+  return getArgvValue('path') || process.env.STORAGE_PATH || defaultPath;
+}
+
+const port = getPortFromArgv(
+  process.env.PORT ? parseInt(process.env.PORT, 10) : 3000
+);
+const storageDir = getStoragePath('./har_storage');
+
 // --- 主程序入口 ---
-const sources = process.argv.slice(2);
+const sources = process.argv.slice(2).filter(arg => !arg.startsWith('--port=') && !arg.startsWith('--path='));
 if (sources.length === 0) {
-    console.log('Usage: ts-node src/server.ts [path-to-har-file | path-to-directory] ...');
+    console.log('Usage: ts-node src/server.ts [path-to-har-file | path-to-directory] ... [--port=PORT] [--path=STORAGE_DIR]');
     console.log('No initial paths provided. Server will start with an empty set, manage files via UI.');
 }
-const server = new HarReplayServer(sources, './har_storage', 3000);
+const server = new HarReplayServer(sources, storageDir, port);
 server.start();
