@@ -277,7 +277,7 @@ class HarReplayServer {
         --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
         --font-mono: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
     }
-    html, body { height: 100%; margin: 0; overflow: hidden; font-family: var(--font-sans); background-color: var(--bg-color); color: var(--text-color); }
+    html, body { height: 100%; margin: 0; overflow: auto; font-family: var(--font-sans); background-color: var(--bg-color); color: var(--text-color); }
     body { box-sizing: border-box; padding-bottom: 3em;}
     .container {
         max-width: 1400px;
