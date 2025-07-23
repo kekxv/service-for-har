@@ -8,6 +8,9 @@ on:
       - 'package.json'
       - '.github/workflows/publish.yml'
 
+permissions:
+  contents: write
+
 jobs:
   tag-version:
     runs-on: ubuntu-latest
