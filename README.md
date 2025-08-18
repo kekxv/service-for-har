@@ -10,6 +10,7 @@
 - 🛠️ 提供 API 服务，便于集成和自动化
 - 🔌 支持自定义扩展，满足个性化需求
 - 📦 一键运行，快速上手
+- 📁 支持上传并自动转换 SAZ 文件（Fiddler 抓包文件）为 HAR 格式
 
 ---
 
@@ -20,6 +21,8 @@
 ```bash
 pnpm install
 ```
+
+> 项目依赖于 `iconv-lite` 库来处理不同编码的 SAZ 文件，包括 UTF-8 和 GBK 编码。
 
 ### 2. 启动服务
 
@@ -91,6 +94,7 @@ Apache License
 - Provide API services
 - Support custom extensions
 - Easy to use
+- Support uploading and automatically converting SAZ files (Fiddler capture files) to HAR format with UTF-8 and GBK encoding support
 
 ### Quick Start
 

@@ -7,6 +7,7 @@ import { deepEqual } from 'assert';
 import chalk from 'chalk';
 import formidable from 'formidable';
 import crypto from 'crypto';
+import { convertSazToHar } from './saz-converter.js';
 
 // --- 类型定义 ---
 interface HarHeader { name: string; value: string; }
@@ -354,7 +355,7 @@ class HarReplayServer {
         <div class="panel">
             <h2>File Management</h2>
             <form action="/_manage/upload" method="post" enctype="multipart/form-data" class="upload-form">
-                <input type="file" name="harfile" accept=".har" required />
+                <input type="file" name="harfile" accept=".har,.saz" required />
                 <button type="submit" class="btn btn-primary">Upload</button>
             </form>
             <ul class="file-list">${renderFileList(files)}</ul>
@@ -421,20 +422,83 @@ class HarReplayServer {
             }
             try {
                 const originalName = uploadedFile.originalFilename || 'unknown.har';
-                const baseName = originalName.replace(/\.har$/i, '');
-                const sanitizedName = baseName.replace(/[\\/:"*?<>|]/g, '_');
-                const timestamp = this._getFormattedTimestamp();
-                const randomChars = crypto.randomBytes(3).toString('hex');
-                const newName = `${timestamp}_${sanitizedName}_${randomChars}.har`;
-                const newPath = path.join(this.storageDir, newName);
-                await fs.rename(uploadedFile.filepath, newPath);
-                console.log(chalk.green(`[UPLOAD] Saved new file as: ${newName}`));
-                await this._reloadAllHars();
+                const fileExt = path.extname(originalName).toLowerCase();
+                
+                // 处理 SAZ 文件
+                if (fileExt === '.saz') {
+                    const baseName = originalName.replace(/\\.saz$/i, '');
+                    const sanitizedName = baseName.replace(/[\\\\/:\"*?<>|]/g, '_');
+                    const timestamp = this._getFormattedTimestamp();
+                    const randomChars = crypto.randomBytes(3).toString('hex');
+                    const sazName = `${timestamp}_${sanitizedName}_${randomChars}.saz`;
+                    const sazPath = path.join(this.storageDir, sazName);
+                    
+                    // 保存原始 SAZ 文件
+                    await fs.rename(uploadedFile.filepath, sazPath);
+                    console.log(chalk.green(`[UPLOAD] Saved new SAZ file as: ${sazName}`));
+                    
+                    // 转换为 HAR 文件
+                    const harName = `${timestamp}_${sanitizedName}_${randomChars}.har`;
+                    const harPath = path.join(this.storageDir, harName);
+                    
+                    try {
+                        // 使用自定义转换器转换文件
+                        await convertSazToHar(sazPath, harPath);
+                        console.log(chalk.green(`[CONVERT] Converted SAZ to HAR: ${harName}`));
+                        
+                        // 删除原始 SAZ 文件（可选）
+                        await fs.unlink(sazPath).catch(() => {});
+                        
+                        // 重新加载 HAR 文件
+                        await this._reloadAllHars();
+                    } catch (utf8Error) {
+                        console.warn('[WARN] UTF-8 conversion failed, trying GBK encoding:', (utf8Error as Error).message);
+                        try {
+                            // 转换文件
+                            await convertSazToHar(sazPath, harPath);
+                            console.log(chalk.green(`[CONVERT] Converted SAZ to HAR with GBK encoding: ${harName}`));
+                            
+                            // 删除原始 SAZ 文件（可选）
+                            await fs.unlink(sazPath).catch(() => {});
+                            
+                            // 重新加载 HAR 文件
+                            await this._reloadAllHars();
+                        } catch (gbkError) {
+                            console.error('[ERROR] Both UTF-8 and GBK conversion failed:', gbkError);
+                            // 如果转换失败，删除上传的 SAZ 文件
+                            await fs.unlink(sazPath).catch(() => {});
+                            throw gbkError;
+                        }
+                    }
+                } 
+                // 处理 HAR 文件
+                else if (fileExt === '.har') {
+                    const baseName = originalName.replace(/\\.har$/i, '');
+                    const sanitizedName = baseName.replace(/[\\\\/:\"*?<>|]/g, '_');
+                    const timestamp = this._getFormattedTimestamp();
+                    const randomChars = crypto.randomBytes(3).toString('hex');
+                    const newName = `${timestamp}_${sanitizedName}_${randomChars}.har`;
+                    const newPath = path.join(this.storageDir, newName);
+                    await fs.rename(uploadedFile.filepath, newPath);
+                    console.log(chalk.green(`[UPLOAD] Saved new file as: ${newName}`));
+                    await this._reloadAllHars();
+                } 
+                // 不支持的文件类型
+                else {
+                    console.warn(`[WARN] Upload attempt with unsupported file type: ${fileExt}`);
+                    if (uploadedFile.filepath) {
+                        await fs.unlink(uploadedFile.filepath).catch(() => {});
+                    }
+                    res.writeHead(400).end('Unsupported file type. Only .har and .saz files are allowed.');
+                    return;
+                }
             } catch (processError) {
                 console.error('[ERROR] Failed to process uploaded file:', processError);
-                if (uploadedFile.filepath) {
+                if (uploadedFile?.filepath) {
                     await fs.unlink(uploadedFile.filepath).catch(() => {});
                 }
+                res.writeHead(500).end('Failed to process uploaded file.');
+                return;
             } finally {
                 res.writeHead(302, { 'Location': '/_manage' });
                 res.end();
