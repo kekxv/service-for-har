@@ -622,17 +622,14 @@ class HarReplayServer {
             text-decoration: underline;
         }
         .request-list {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 20px;
         }
         .request-card {
             background: var(--panel-bg);
             border-radius: 8px;
             box-shadow: 0 4px 6px rgba(0,0,0,0.05);
             padding: 20px;
-            flex: 1;
             min-width: 300px;
+            margin-bottom: 5px;
         }
         .request-card h2 {
             margin-top: 0;
