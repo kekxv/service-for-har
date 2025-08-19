@@ -576,10 +576,33 @@ class HarReplayServer {
 
         // 获取所有匹配的请求详情
         const requests = replayState.entries.map((entry, index) => {
+            // 获取响应内容类型
+            const contentType = entry.response.content?.mimeType || 'text/plain';
+            
+            // 判断是否为图片或视频
+            const isImage = contentType.startsWith('image/');
+            const isVideo = contentType.startsWith('video/');
+            
+            // 如果是图片或视频，准备base64数据
+            let mediaData = '';
+            if ((isImage || isVideo) && entry.response.content?.text) {
+                if (entry.response.content.encoding === 'base64') {
+                    mediaData = entry.response.content.text;
+                } else {
+                    // 如果不是base64编码，需要转换（这里简化处理）
+                    mediaData = Buffer.from(entry.response.content.text).toString('base64');
+                }
+            }
+            
             return {
                 index,
                 request: entry.request,
-                responseStatus: entry.response.status
+                response: entry.response,
+                responseStatus: entry.response.status,
+                contentType,
+                isImage,
+                isVideo,
+                mediaData
             };
         });
 
@@ -674,6 +697,13 @@ class HarReplayServer {
             max-height: 200px;
             overflow-y: auto;
         }
+        .media-content {
+            max-width: 100%;
+            max-height: 500px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            margin-top: 10px;
+        }
         .empty {
             color: var(--light-gray);
             font-style: italic;
@@ -714,6 +744,16 @@ class HarReplayServer {
             word-break: break-all;
             max-height: 300px;
             overflow-y: auto;
+        }
+        .content-type-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.8em;
+            font-weight: bold;
+            margin-left: 10px;
+            background-color: #e9ecef;
+            color: #495057;
         }
     </style>
 </head>
@@ -766,6 +806,24 @@ class HarReplayServer {
                         ` : ''}
                     ` : ''}
                     
+                    <h3>Response Content <span class="content-type-badge">${req.contentType}</span></h3>
+                    ${req.isImage ? `
+                        <div>
+                            <img src="data:${req.contentType};base64,${req.mediaData}" class="media-content" alt="Response Image" />
+                        </div>
+                    ` : req.isVideo ? `
+                        <div>
+                            <video controls class="media-content">
+                                <source src="data:${req.contentType};base64,${req.mediaData}" type="${req.contentType}">
+                                Your browser does not support the video tag.
+                            </video>
+                        </div>
+                    ` : `
+                        ${req.response.content?.text ? `
+                            <div class="post-data">${req.response.content.text}</div>
+                        ` : '<div class="empty">No response content</div>'}
+                    `}
+                    
                     <button class="simulate-btn" data-request-index="${req.index}" data-method="${req.request.method}" data-url="${req.request.url}">模拟请求</button>
                     <div class="response-container" id="response-${req.index}">
                         <div class="response-header">Response:</div>
@@ -783,6 +841,8 @@ class HarReplayServer {
                 if (e.target.classList.contains('simulate-btn')) {
                     const btn = e.target;
                     const requestIndex = btn.getAttribute('data-request-index');
+                    const method = btn.getAttribute('data-method');
+                    const url = btn.getAttribute('data-url');
                     const responseContainer = document.getElementById('response-' + requestIndex);
                     const responseContent = document.getElementById('response-content-' + requestIndex);
                     
@@ -793,16 +853,18 @@ class HarReplayServer {
                     responseContent.textContent = '发送请求中...';
                     
                     try {
-                        // 替换URL中的host为当前host
-                        const currentHost = window.location.host;
+                        // 解析URL，提取路径和查询参数
+                        const urlObj = new URL(url, 'http://dummy.base');
+                        const pathWithQuery = urlObj.pathname + urlObj.search;
+                        
                         // 构造请求选项
                         const requestOptions = {
-                            method: '${method}',
+                            method: method,
                             headers: {}
                         };
                         
                         // 发送请求
-                        const response = await fetch('${path}', requestOptions);
+                        const response = await fetch(pathWithQuery, requestOptions);
                         
                         // 显示响应
                         const statusText = response.statusText || 'Unknown';
@@ -811,7 +873,7 @@ class HarReplayServer {
                         // 添加响应头
                         responseText += '\\nHeaders:\\n';
                         for (const [key, value] of response.headers.entries()) {
-                            responseText += \`\${key}: \${value}\n\`;
+                            responseText += \`\${key}: \${value}\\n\`;
                         }
                         
                         // 添加响应体
@@ -825,7 +887,7 @@ class HarReplayServer {
                         
                         responseContent.textContent = responseText;
                     } catch (error) {
-                        console.error('请求失败: ',error)
+                        console.error('请求失败: ', error);
                         responseContent.textContent = '请求失败: ' + error.message;
                     } finally {
                         // 恢复按钮状态
