@@ -9,6 +9,11 @@ import formidable from 'formidable';
 import crypto from 'crypto';
 import { convertSazToHar } from './saz-converter.js';
 
+function escapeHtml(text: string | undefined | null): string {
+    if (text === undefined || text === null) return '';
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
 // --- 类型定义 ---
 interface HarHeader { name: string; value: string; }
 interface HarPostData { mimeType: string; text?: string; params?: Array<{ name: string; value: string }>; }
@@ -457,7 +462,7 @@ class HarReplayServer {
                 // 处理 SAZ 文件
                 if (fileExt === '.saz') {
                     const baseName = originalName.replace(/\\.saz$/i, '');
-                    const sanitizedName = baseName.replace(/[\\\\/:\"*?<>|]/g, '_');
+                    const sanitizedName = baseName.replace(/[\\/:\"*?<>|]/g, '_');
                     const timestamp = this._getFormattedTimestamp();
                     const randomChars = crypto.randomBytes(3).toString('hex');
                     const sazName = `${timestamp}_${sanitizedName}_${randomChars}.saz`;
@@ -504,7 +509,7 @@ class HarReplayServer {
                 // 处理 HAR 文件
                 else if (fileExt === '.har') {
                     const baseName = originalName.replace(/\\.har$/i, '');
-                    const sanitizedName = baseName.replace(/[\\\\/:\"*?<>|]/g, '_');
+                    const sanitizedName = baseName.replace(/[\\/:\"*?<>|]/g, '_');
                     const timestamp = this._getFormattedTimestamp();
                     const randomChars = crypto.randomBytes(3).toString('hex');
                     const newName = `${timestamp}_${sanitizedName}_${randomChars}.har`;
@@ -570,28 +575,19 @@ class HarReplayServer {
         const replayState = this.harDataMap.get(method)?.get(path);
         if (!replayState || replayState.entries.length === 0) {
             res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end('<h2>No request data found</h2>');
+            res.end('<h2>No request data found for ' + escapeHtml(method) + ' ' + escapeHtml(path) + '</h2>');
             return;
         }
 
-        // 获取所有匹配的请求详情
         const requests = replayState.entries.map((entry, index) => {
-            // 获取响应内容类型
             const contentType = entry.response.content?.mimeType || 'text/plain';
-            
-            // 判断是否为图片或视频
             const isImage = contentType.startsWith('image/');
             const isVideo = contentType.startsWith('video/');
-            
-            // 如果是图片或视频，准备base64数据
             let mediaData = '';
             if ((isImage || isVideo) && entry.response.content?.text) {
-                if (entry.response.content.encoding === 'base64') {
-                    mediaData = entry.response.content.text;
-                } else {
-                    // 如果不是base64编码，需要转换（这里简化处理）
-                    mediaData = Buffer.from(entry.response.content.text).toString('base64');
-                }
+                mediaData = entry.response.content.encoding === 'base64'
+                    ? entry.response.content.text
+                    : Buffer.from(entry.response.content.text).toString('base64');
             }
             
             return {
@@ -606,12 +602,14 @@ class HarReplayServer {
             };
         });
 
+        const simulationData = replayState.entries.map(entry => entry.request);
+
         const detailsHtml = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Request Details - ${method} ${path}</title>
+    <title>Request Details - ${escapeHtml(method)} ${escapeHtml(path)}</title>
     <style>
         :root { 
             --bg-color: #f8f9fa; --panel-bg: #ffffff; --text-color: #212529; --border-color: #dee2e6; 
@@ -619,214 +617,61 @@ class HarReplayServer {
             --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             --font-mono: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
         }
-        body { 
-            font-family: var(--font-sans); 
-            background-color: var(--bg-color); 
-            color: var(--text-color); 
-            margin: 0; 
-            padding: 20px;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-        h1 { 
-            color: #343a40; 
-            margin-bottom: 1rem;
-            font-size: 1.5rem;
-        }
-        .back-link {
-            display: inline-block;
-            margin-bottom: 1rem;
-            color: var(--primary);
-            text-decoration: none;
-        }
-        .back-link:hover {
-            text-decoration: underline;
-        }
-        .request-list {
-        }
-        .request-card {
-            background: var(--panel-bg);
-            border-radius: 8px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-            padding: 20px;
-            min-width: 300px;
-            margin-bottom: 5px;
-        }
-        .request-card h2 {
-            margin-top: 0;
-            font-size: 1.2rem;
-            border-bottom: 1px solid var(--border-color);
-            padding-bottom: 10px;
-        }
-        .request-card h3 {
-            font-size: 1rem;
-            margin: 15px 0 10px;
-        }
-        .request-info {
-            margin-bottom: 15px;
-        }
-        .request-info div {
-            margin-bottom: 5px;
-        }
-        .header-list, .param-list {
-            background: #f8f9fa;
-            border-radius: 4px;
-            padding: 10px;
-            font-family: var(--font-mono);
-            font-size: 0.9em;
-            max-height: 200px;
-            overflow-y: auto;
-        }
-        .header-item, .param-item {
-            margin-bottom: 5px;
-        }
-        .header-name, .param-name {
-            font-weight: bold;
-            color: #495057;
-        }
-        .post-data {
-            background: #f8f9fa;
-            border-radius: 4px;
-            padding: 10px;
-            font-family: var(--font-mono);
-            font-size: 0.9em;
-            white-space: pre-wrap;
-            word-break: break-all;
-            max-height: 200px;
-            overflow-y: auto;
-        }
-        .media-content {
-            max-width: 100%;
-            max-height: 500px;
-            border: 1px solid var(--border-color);
-            border-radius: 4px;
-            margin-top: 10px;
-        }
-        .empty {
-            color: var(--light-gray);
-            font-style: italic;
-        }
-        .simulate-btn {
-            background-color: var(--success);
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.9em;
-            margin-top: 15px;
-            transition: filter 0.2s;
-        }
-        .simulate-btn:hover {
-            filter: brightness(0.9);
-        }
-        .simulate-btn:disabled {
-            background-color: #6c757d;
-            cursor: not-allowed;
-        }
-        .response-container {
-            margin-top: 15px;
-            padding: 10px;
-            background: #f8f9fa;
-            border-radius: 4px;
-            display: none;
-        }
-        .response-header {
-            font-weight: bold;
-            margin-bottom: 5px;
-        }
-        .response-content {
-            font-family: var(--font-mono);
-            font-size: 0.9em;
-            white-space: pre-wrap;
-            word-break: break-all;
-            max-height: 300px;
-            overflow-y: auto;
-        }
-        .content-type-badge {
-            display: inline-block;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 0.8em;
-            font-weight: bold;
-            margin-left: 10px;
-            background-color: #e9ecef;
-            color: #495057;
-        }
+        body { font-family: var(--font-sans); background-color: var(--bg-color); color: var(--text-color); margin: 0; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { color: #343a40; margin-bottom: 1rem; font-size: 1.5rem; word-break: break-all; }
+        .back-link { display: inline-block; margin-bottom: 1rem; color: var(--primary); text-decoration: none; }
+        .back-link:hover { text-decoration: underline; }
+        .request-card { background: var(--panel-bg); border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); padding: 20px; margin-bottom: 20px; }
+        h2 { margin-top: 0; font-size: 1.2rem; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; }
+        h3 { font-size: 1rem; margin: 15px 0 10px; }
+        .header-list, .param-list, .post-data { background: #f1f3f5; border-radius: 4px; padding: 10px; font-family: var(--font-mono); font-size: 0.9em; max-height: 300px; overflow-y: auto; }
+        .post-data { white-space: pre-wrap; word-break: break-all; }
+        .media-content { max-width: 100%; max-height: 500px; border: 1px solid var(--border-color); border-radius: 4px; margin-top: 10px; }
+        .empty { color: var(--light-gray); font-style: italic; }
+        .simulate-btn { background-color: var(--success); color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 0.9em; margin-top: 15px; }
+        .simulate-btn:disabled { background-color: #6c757d; cursor: not-allowed; }
+        .response-container { margin-top: 15px; padding: 10px; background: #f1f3f5; border-radius: 4px; display: none; }
+        .response-content { font-family: var(--font-mono); font-size: 0.9em; white-space: pre-wrap; word-break: break-all; max-height: 400px; overflow-y: auto; }
+        .content-type-badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; font-weight: bold; margin-left: 10px; background-color: #e9ecef; color: #495057; }
     </style>
 </head>
 <body>
     <div class="container">
         <a href="/_manage" class="back-link">← Back to Management</a>
-        <h1>Request Details: ${method} ${path}</h1>
-        
+        <h1>Request Details: ${escapeHtml(method)} ${escapeHtml(path)}</h1>
         <div class="request-list">
             ${requests.map(req => `
                 <div class="request-card">
                     <h2>Request #${req.index + 1} (Response Status: ${req.responseStatus})</h2>
-                    
-                    <div class="request-info">
-                        <div><strong>Method:</strong> ${req.request.method}</div>
-                        <div><strong>URL:</strong> ${req.request.url}</div>
-                    </div>
-                    
-                    <h3>Headers (${req.request.headers.length})</h3>
-                    ${req.request.headers.length > 0 ? `
-                        <div class="header-list">
-                            ${req.request.headers.map(header => `
-                                <div class="header-item">
-                                    <span class="header-name">${header.name}:</span> 
-                                    <span class="header-value">${header.value}</span>
-                                </div>
-                            `).join('')}
-                        </div>
-                    ` : '<div class="empty">No headers</div>'}
+                    <div><strong>URL:</strong> ${escapeHtml(req.request.url)}</div>
+                    <h3>Headers</h3>
+                    <div class="header-list">${req.request.headers.map(h => `<div><strong>${escapeHtml(h.name)}:</strong> ${escapeHtml(h.value)}</div>`).join('') || '<div class="empty">No headers</div>'}</div>
                     
                     ${req.request.postData ? `
                         <h3>Post Data</h3>
-                        <div><strong>MIME Type:</strong> ${req.request.postData.mimeType}</div>
+                        <div><strong>MIME Type:</strong> ${escapeHtml(req.request.postData.mimeType)}</div>
                         ${req.request.postData.params ? `
-                            <h3>Parameters (${req.request.postData.params.length})</h3>
-                            ${req.request.postData.params.length > 0 ? `
-                                <div class="param-list">
-                                    ${req.request.postData.params.map(param => `
-                                        <div class="param-item">
-                                            <span class="param-name">${param.name}:</span> 
-                                            <span class="param-value">${param.value}</span>
-                                        </div>
-                                    `).join('')}
-                                </div>
-                            ` : '<div class="empty">No parameters</div>'}
+                            <h4>Parameters</h4>
+                            <div class="param-list">${req.request.postData.params.map(p => `<div><strong>${escapeHtml(p.name)}:</strong> ${escapeHtml(p.value)}</div>`).join('') || '<div class="empty">No parameters</div>'}</div>
                         ` : ''}
                         ${req.request.postData.text ? `
-                            <h3>Body Content</h3>
-                            <div class="post-data">${req.request.postData.text}</div>
+                            <h4>Body Content</h4>
+                            <pre class="post-data">${escapeHtml(req.request.postData.text)}</pre>
                         ` : ''}
                     ` : ''}
                     
-                    <h3>Response Content <span class="content-type-badge">${req.contentType}</span></h3>
+                    <h3>Response Content <span class="content-type-badge">${escapeHtml(req.contentType)}</span></h3>
                     ${req.isImage ? `
-                        <div>
-                            <img src="data:${req.contentType};base64,${req.mediaData}" class="media-content" alt="Response Image" />
-                        </div>
+                        <img src="data:${req.contentType};base64,${req.mediaData}" class="media-content" alt="Response Image" />
                     ` : req.isVideo ? `
-                        <div>
-                            <video controls class="media-content">
-                                <source src="data:${req.contentType};base64,${req.mediaData}" type="${req.contentType}">
-                                Your browser does not support the video tag.
-                            </video>
-                        </div>
+                        <video controls class="media-content"><source src="data:${req.contentType};base64,${req.mediaData}" type="${req.contentType}"></video>
                     ` : `
-                        ${req.response.content?.text ? `
-                            <div class="post-data">${req.response.content.text}</div>
-                        ` : '<div class="empty">No response content</div>'}
+                        <pre class="post-data">${escapeHtml(req.response.content?.text) || '<span class="empty">No response content</span>'}</pre>
                     `}
                     
-                    <button class="simulate-btn" data-request-index="${req.index}" data-method="${req.request.method}" data-url="${req.request.url}">模拟请求</button>
+                    <button class="simulate-btn" data-request-index="${req.index}">Simulate Request</button>
                     <div class="response-container" id="response-${req.index}">
-                        <div class="response-header">Response:</div>
                         <div class="response-content" id="response-content-${req.index}"></div>
                     </div>
                 </div>
@@ -835,67 +680,69 @@ class HarReplayServer {
     </div>
     
     <script>
-        document.addEventListener('DOMContentLoaded', () => {
-            // 添加模拟请求功能
-            document.addEventListener('click', async (e) => {
-                if (e.target.classList.contains('simulate-btn')) {
-                    const btn = e.target;
-                    const requestIndex = btn.getAttribute('data-request-index');
-                    const method = btn.getAttribute('data-method');
-                    const url = btn.getAttribute('data-url');
-                    const responseContainer = document.getElementById('response-' + requestIndex);
-                    const responseContent = document.getElementById('response-content-' + requestIndex);
-                    
-                    // 禁用按钮并显示加载状态
-                    btn.disabled = true;
-                    btn.textContent = '请求中...';
-                    responseContainer.style.display = 'block';
-                    responseContent.textContent = '发送请求中...';
-                    
-                    try {
-                        // 解析URL，提取路径和查询参数
-                        const urlObj = new URL(url, 'http://dummy.base');
-                        const pathWithQuery = urlObj.pathname + urlObj.search;
-                        
-                        // 构造请求选项
-                        const requestOptions = {
-                            method: method,
-                            headers: {}
-                        };
-                        
-                        // 发送请求
-                        const response = await fetch(pathWithQuery, requestOptions);
-                        
-                        // 显示响应
-                        const statusText = response.statusText || 'Unknown';
-                        let responseText = 'Status: ' + response.status + ' ' + statusText + '\\n';
-                        
-                        // 添加响应头
-                        responseText += '\\nHeaders:\\n';
-                        for (const [key, value] of response.headers.entries()) {
-                            responseText += \`\${key}: \${value}\\n\`;
+        const simulationData = ${JSON.stringify(simulationData)};
+        document.addEventListener('click', async (e) => {
+            if (!(e.target instanceof HTMLElement) || !e.target.classList.contains('simulate-btn')) return;
+            
+            const btn = e.target;
+            const requestIndex = parseInt(btn.getAttribute('data-request-index'), 10);
+            const requestData = simulationData[requestIndex];
+            
+            const responseContainer = document.getElementById('response-' + requestIndex);
+            const responseContent = document.getElementById('response-content-' + requestIndex);
+
+            btn.disabled = true;
+            btn.textContent = 'Requesting...';
+            if (responseContainer) responseContainer.style.display = 'block';
+            if (responseContent) responseContent.textContent = 'Sending request...';
+
+            try {
+                const urlObj = new URL(requestData.url, 'http://dummy.base');
+                const pathWithQuery = urlObj.pathname + urlObj.search;
+
+                const requestOptions = {
+                    method: requestData.method,
+                    headers: {},
+                    body: undefined
+                };
+
+                if (requestData.headers) {
+                    requestData.headers.forEach(header => {
+                        if (!['host', 'connection', 'content-length', 'transfer-encoding'].includes(header.name.toLowerCase())) {
+                            requestOptions.headers[header.name] = header.value;
                         }
-                        
-                        // 添加响应体
-                        responseText += '\\nBody:\\n';
-                        try {
-                            const body = await response.text();
-                            responseText += body;
-                        } catch (err) {
-                            responseText += '无法读取响应体: ' + err.message;
-                        }
-                        
-                        responseContent.textContent = responseText;
-                    } catch (error) {
-                        console.error('请求失败: ', error);
-                        responseContent.textContent = '请求失败: ' + error.message;
-                    } finally {
-                        // 恢复按钮状态
-                        btn.disabled = false;
-                        btn.textContent = '模拟请求';
-                    }
+                    });
                 }
-            });
+
+                if (requestData.postData && requestData.postData.text) {
+                    requestOptions.body = requestData.postData.text;
+                }
+
+                const response = await fetch(pathWithQuery, requestOptions);
+                const statusText = response.statusText || 'Unknown';
+                
+                let responseText = 'Status: ' + response.status + ' ' + statusText + '\n\n';
+                responseText += 'Headers:\n';
+                response.headers.forEach((value, key) => {
+                    responseText += key + ': ' + value + '\n';
+                });
+                responseText += '\nBody:\n';
+                
+                try {
+                    const body = await response.text();
+                    responseText += body;
+                } catch (err) {
+                    responseText += 'Could not read response body: ' + (err instanceof Error ? err.message : String(err));
+                }
+                if (responseContent) responseContent.textContent = responseText;
+
+            } catch (error) {
+                console.error('Simulation failed:', error);
+                if (responseContent) responseContent.textContent = 'Request failed: ' + (error instanceof Error ? error.message : String(error));
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Simulate Request';
+            }
         });
     </script>
 </body>
