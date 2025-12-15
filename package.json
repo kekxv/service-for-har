@@ -1,6 +1,6 @@
 {
   "name": "service-for-har",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "",
   "main": "dist/server.js",
   "bin": {
