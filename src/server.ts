@@ -125,7 +125,11 @@ class HarReplayServer {
 
     private async _processSingleHarFile(harFilePath: string): Promise<void> {
         try {
-            const fileContent = await fs.readFile(harFilePath, 'utf-8');
+            let fileContent = await fs.readFile(harFilePath, 'utf-8');
+            // Strip BOM if present
+            if (fileContent.charCodeAt(0) === 0xFEFF) {
+                fileContent = fileContent.slice(1);
+            }
             const harJson: HarFile = JSON.parse(fileContent);
             if (!harJson.log || !harJson.log.entries) {
                 console.warn(chalk.yellow(`[WARN] Invalid HAR format in file: ${harFilePath}.`));
@@ -490,7 +494,7 @@ class HarReplayServer {
                         console.warn('[WARN] UTF-8 conversion failed, trying GBK encoding:', (utf8Error as Error).message);
                         try {
                             // 转换文件
-                            await convertSazToHar(sazPath, harPath);
+                            await convertSazToHar(sazPath, harPath, 'gbk');
                             console.log(chalk.green(`[CONVERT] Converted SAZ to HAR with GBK encoding: ${harName}`));
                             
                             // 删除原始 SAZ 文件（可选）
@@ -603,6 +607,14 @@ class HarReplayServer {
         });
 
         const simulationData = replayState.entries.map(entry => entry.request);
+        // 采用安全的 HTML JSON 注入策略：
+        // 1. JSON.stringify 已经处理了绝大多数特殊字符。
+        // 2. 只需要额外处理可能破坏 HTML 解析的字符（<, >, \u2028, \u2029）。
+        const safeSimulationData = JSON.stringify(simulationData)
+            .replace(/</g, '\\u003c')
+            .replace(/>/g, '\\u003e')
+            .replace(/\u2028/g, '\\u2028')
+            .replace(/\u2029/g, '\\u2029');
 
         const detailsHtml = `
 <!DOCTYPE html>
@@ -680,7 +692,7 @@ class HarReplayServer {
     </div>
     
     <script>
-        const simulationData = ${JSON.stringify(simulationData)};
+        const simulationData = ${safeSimulationData};
         document.addEventListener('click', async (e) => {
             if (!(e.target instanceof HTMLElement) || !e.target.classList.contains('simulate-btn')) return;
             
@@ -721,12 +733,12 @@ class HarReplayServer {
                 const response = await fetch(pathWithQuery, requestOptions);
                 const statusText = response.statusText || 'Unknown';
                 
-                let responseText = 'Status: ' + response.status + ' ' + statusText + '\n\n';
-                responseText += 'Headers:\n';
+                let responseText = 'Status: ' + response.status + ' ' + statusText + '\\n\\n';
+                responseText += 'Headers:\\n';
                 response.headers.forEach((value, key) => {
-                    responseText += key + ': ' + value + '\n';
+                    responseText += key + ': ' + value + '\\n';
                 });
-                responseText += '\nBody:\n';
+                responseText += '\\nBody:\\n';
                 
                 try {
                     const body = await response.text();

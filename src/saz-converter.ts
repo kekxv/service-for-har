@@ -5,7 +5,6 @@ import iconv from 'iconv-lite';
 import { createHash } from 'crypto';
 import { tmpdir } from 'os';
 import { rimraf } from 'rimraf';
-import { XMLParser } from 'fast-xml-parser';
 
 // HAR 类型定义
 interface HarHeader {
@@ -122,31 +121,12 @@ function parseSazFile(filename: string, content: Buffer): SazFileData | null {
 }
 
 /**
- * 解析元数据 XML
- * @param xmlContent XML 内容
- * @returns 解析后的对象
- */
-function parseMetadataXml(xmlContent: string): any {
-    const parser = new XMLParser({
-        ignoreAttributes: false,
-        attributeNamePrefix: '@_',
-        textNodeName: 'text'
-    });
-    
-    try {
-        return parser.parse(xmlContent);
-    } catch (error) {
-        console.error('Failed to parse metadata XML:', error);
-        return {};
-    }
-}
-
-/**
  * 解析 HTTP 请求
  * @param requestContent 请求内容（binary string）
+ * @param encoding 文本编码
  * @returns 解析后的请求对象
  */
-function parseHttpRequest(requestContent: string): HarRequest | null {
+function parseHttpRequest(requestContent: string, encoding: string = 'utf-8'): HarRequest | null {
     if (!requestContent) return null;
     
     // 将 binary string 转换为 Buffer 以正确处理二进制数据
@@ -171,7 +151,7 @@ function parseHttpRequest(requestContent: string): HarRequest | null {
     }
     
     // 解析请求行
-    const headersString = headersBuffer.toString('utf-8');
+    const headersString = iconv.decode(headersBuffer, encoding);
     const lines = headersString.split(/\r\n|\n/);
     const requestLine = lines[0].trim();
     const [method, url, protocol] = requestLine.split(' ');
@@ -203,7 +183,7 @@ function parseHttpRequest(requestContent: string): HarRequest | null {
         
         // 对于表单数据，使用 params 格式
         if (mimeType === 'application/x-www-form-urlencoded') {
-            const bodyString = bodyBuffer.toString('utf-8');
+            const bodyString = iconv.decode(bodyBuffer, encoding);
             const params: Array<{ name: string; value: string }> = [];
             
             for (const pair of bodyString.split('&')) {
@@ -243,7 +223,7 @@ function parseHttpRequest(requestContent: string): HarRequest | null {
             } else {
                 postData = {
                     mimeType,
-                    text: bodyBuffer.toString('utf-8')
+                    text: iconv.decode(bodyBuffer, encoding)
                 };
             }
         }
@@ -260,9 +240,10 @@ function parseHttpRequest(requestContent: string): HarRequest | null {
 /**
  * 解析 HTTP 响应
  * @param responseContent 响应内容（binary string）
+ * @param encoding 文本编码
  * @returns 解析后的响应对象
  */
-function parseHttpResponse(responseContent: string): HarResponse | null {
+function parseHttpResponse(responseContent: string, encoding: string = 'utf-8'): HarResponse | null {
     if (!responseContent) return null;
     
     // 将 binary string 转换为 Buffer 以正确处理二进制数据
@@ -287,7 +268,7 @@ function parseHttpResponse(responseContent: string): HarResponse | null {
     }
     
     // 解析响应行
-    const headersString = headersBuffer.toString('utf-8');
+    const headersString = iconv.decode(headersBuffer, encoding);
     const lines = headersString.split(/\r\n|\n/);
     const statusLine = lines[0].trim();
     const parts = statusLine.split(' ');
@@ -361,8 +342,8 @@ function parseHttpResponse(responseContent: string): HarResponse | null {
         content.encoding = 'base64';
         content.text = bodyBuffer.toString('base64');
     } else {
-        // 文本内容直接使用 utf-8 解码
-        content.text = bodyBuffer.toString('utf-8');
+        // 文本内容使用指定编码解码
+        content.text = iconv.decode(bodyBuffer, encoding);
     }
     
     return {
@@ -376,9 +357,10 @@ function parseHttpResponse(responseContent: string): HarResponse | null {
 /**
  * 将解析后的 SAZ 数据转换为 HAR 格式
  * @param sazData 解析后的 SAZ 数据
+ * @param encoding 文本编码
  * @returns HAR 对象
  */
-function convertSazDataToHar(sazData: SazFileData[]): HarFile {
+function convertSazDataToHar(sazData: SazFileData[], encoding: string = 'utf-8'): HarFile {
     const entries: HarEntry[] = [];
     
     // 按位置排序
@@ -413,8 +395,8 @@ function convertSazDataToHar(sazData: SazFileData[]): HarFile {
     // 转换为 HAR 条目
     for (const position in mergedData) {
         const item = mergedData[position];
-        const request = parseHttpRequest(item.request);
-        const response = parseHttpResponse(item.response);
+        const request = parseHttpRequest(item.request, encoding);
+        const response = parseHttpResponse(item.response, encoding);
         
         if (request && response) {
             entries.push({
@@ -444,8 +426,9 @@ function convertSazDataToHar(sazData: SazFileData[]): HarFile {
  * 转换 SAZ 文件为 HAR 格式
  * @param sazPath SAZ 文件路径
  * @param harPath HAR 文件路径
+ * @param encoding 文本编码（默认为 utf-8）
  */
-export async function convertSazToHar(sazPath: string, harPath: string): Promise<void> {
+export async function convertSazToHar(sazPath: string, harPath: string, encoding: string = 'utf-8'): Promise<void> {
     // 创建临时目录用于解压
     const tempDir = path.join(tmpdir(), `saz-extract-${createHash('md5').update(sazPath).digest('hex')}`);
     
@@ -471,7 +454,7 @@ export async function convertSazToHar(sazPath: string, harPath: string): Promise
         }
         
         // 转换为 HAR 格式
-        const harData = convertSazDataToHar(sazData);
+        const harData = convertSazDataToHar(sazData, encoding);
         
         // 写入 HAR 文件
         await fs.writeFile(harPath, JSON.stringify(harData, null, 2), 'utf-8');
